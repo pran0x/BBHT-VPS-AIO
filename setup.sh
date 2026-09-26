@@ -98,6 +98,9 @@ go_install() {
 
 # ---------- 3. ProjectDiscovery + recon tool suite (Go) ----------
 log "Installing recon/scanning tools (Go-based)..."
+GO_TOOL_NAMES=(subfinder httpx nuclei katana dnsx naabu notify interactsh-client \
+    assetfinder waybackurls gau unfurl anew qsreplace gf ffuf gowitness dalfox \
+    gospider amass crlfuzz)
 go_install subfinder    "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
 go_install httpx        "github.com/projectdiscovery/httpx/cmd/httpx@latest"
 go_install nuclei       "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"
@@ -188,14 +191,42 @@ ok "Python-based tools installed."
 
 # EyeWitness (screenshotting / triage)
 clone_or_pull "EyeWitness" "https://github.com/FortyNorthSecurity/EyeWitness.git" "EyeWitness"
-if [[ -f "${TOOLS_DIR}/EyeWitness/Python/setup/setup.sh" ]]; then
-    log "Running EyeWitness setup.sh (installs its own apt/pip deps)..."
-    if (cd "${TOOLS_DIR}/EyeWitness/Python/setup" && $SUDO ./setup.sh &>>"$LOGFILE"); then
-        ok "EyeWitness set up."
+EW_SETUP="${TOOLS_DIR}/EyeWitness/Python/setup/setup.sh"
+EW_SCRIPT="${TOOLS_DIR}/EyeWitness/Python/EyeWitness.py"
+EW_REQS="${TOOLS_DIR}/EyeWitness/Python/setup/requirements.txt"
+
+if [[ -f "$EW_SETUP" ]]; then
+    chmod +x "$EW_SETUP"
+    log "Running EyeWitness's own setup.sh (installs firefox-esr, geckodriver, pip deps)..."
+    # PIP_BREAK_SYSTEM_PACKAGES bypasses PEP 668's "externally-managed-
+    # environment" error, which is what makes this vendor script fail out
+    # of the box on Ubuntu 23.04+/24.04 — it calls plain `pip3 install`
+    # internally with no --break-system-packages flag. `yes` auto-answers
+    # any y/n prompt so the script can't hang in a non-interactive run.
+    if (cd "$(dirname "$EW_SETUP")" \
+        && { yes || true; } | $SUDO env PIP_BREAK_SYSTEM_PACKAGES=1 DEBIAN_FRONTEND=noninteractive ./setup.sh &>>"$LOGFILE"); then
+        ok "EyeWitness setup.sh completed."
     else
-        err "EyeWitness setup.sh failed — check $LOGFILE"
+        warn "EyeWitness setup.sh reported an error — check $LOGFILE"
     fi
-    add_alias "eyewitness" "${TOOLS_DIR}/EyeWitness/Python/EyeWitness.py"
+
+    # The vendor script can exit 0 while still leaving a broken Python env,
+    # so verify the actual import chain instead of trusting its exit code.
+    if python3 -c "import selenium, netaddr" &>>"$LOGFILE"; then
+        ok "EyeWitness Python dependencies verified."
+    else
+        warn "EyeWitness deps incomplete after setup.sh — installing requirements.txt directly as a fallback..."
+        if [[ -f "$EW_REQS" ]]; then
+            if pip3 install --break-system-packages -r "$EW_REQS" &>>"$LOGFILE"; then
+                ok "EyeWitness fallback pip install completed."
+            else
+                err "EyeWitness fallback pip install failed — check $LOGFILE"
+            fi
+        else
+            err "EyeWitness requirements.txt not found at $EW_REQS"
+        fi
+    fi
+    add_alias "eyewitness" "$EW_SCRIPT"
 else
     warn "EyeWitness setup script not found — repo layout may have changed."
 fi
@@ -265,10 +296,19 @@ ok "Aliases written to ${ALIASFILE}"
 echo
 ok "Setup complete."
 echo -e "${YELLOW}Run: source ~/.bashrc${NC}  (or open a new terminal) to load the aliases and Go's PATH."
-echo -e "Every Go-based tool (subfinder, httpx, nuclei, katana, dnsx, naabu, ffuf, ...) is on"
-echo -e "PATH via \$HOME/go/bin, also picked up by ~/.bashrc."
 echo
-ok "Installed tool aliases (in ${ALIASFILE}):"
+
+ok "Go-based tools (on \$HOME/go/bin once ~/.bashrc is sourced):"
+for t in "${GO_TOOL_NAMES[@]}"; do
+    if command -v "$t" &>/dev/null || [[ -x "${GOPATH_DIR}/bin/${t}" ]]; then
+        echo -e "  ${GREEN}✓${NC} $t"
+    else
+        echo -e "  ${RED}✗${NC} $t  (failed — check $LOGFILE)"
+    fi
+done
+
+echo
+ok "Aliases (in ${ALIASFILE}, sourced from ~/.bashrc):"
 grep '^alias ' "$ALIASFILE" | sed -E "s/^alias ([a-zA-Z0-9_]+)='(.*)'$/  \1  ->  \2/"
 echo
 echo -e "Tools cloned to: ${TOOLS_DIR}"
